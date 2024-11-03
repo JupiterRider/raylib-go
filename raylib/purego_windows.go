@@ -4,18 +4,28 @@
 package rl
 
 import (
+	"compress/gzip"
+	"embed"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 
 	"github.com/ebitengine/purego"
 	"golang.org/x/sys/windows"
+
+	_ "embed"
 )
 
 const (
 	libname         = "raylib.dll"
 	requiredVersion = "5.0"
 )
+
+//go:embed blobs/raylib.dll.gz
+var compressedDll embed.FS
 
 var wvsprintfA uintptr
 
@@ -26,11 +36,50 @@ func init() {
 	}
 }
 
+// writeDll decompresses the raylib library and writes it into a temp directory
+func writeDll() (string, error) {
+	dllPath := filepath.Join(os.TempDir(), libname)
+
+	_, err := os.Stat(dllPath)
+
+	if os.IsNotExist(err) {
+		dllFile, err := os.Create(dllPath)
+		if err != nil {
+			return "", err
+		}
+		defer dllFile.Close()
+
+		file, err := compressedDll.Open("blobs/raylib.dll.gz")
+		if err != nil {
+			return "", err
+		}
+		defer file.Close()
+
+		gz, err := gzip.NewReader(file)
+		if err != nil {
+			return "", err
+		}
+		defer gz.Close()
+
+		_, err = io.Copy(dllFile, gz)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return dllPath, nil
+}
+
 // loadLibrary loads the raylib dll and panics on error
 func loadLibrary() uintptr {
-	handle, err := windows.LoadLibrary(libname)
+	dllPath, err := writeDll()
 	if err != nil {
-		panic(fmt.Errorf("cannot load library %s: %w", libname, err))
+		panic(err)
+	}
+
+	handle, err := windows.LoadLibrary(dllPath)
+	if err != nil {
+		panic(fmt.Errorf("cannot load library %s: %w", dllPath, err))
 	}
 
 	proc, err := windows.GetProcAddress(handle, "raylib_version")
@@ -40,7 +89,7 @@ func loadLibrary() uintptr {
 
 	version := windows.BytePtrToString(**(***byte)(unsafe.Pointer(&proc)))
 	if version != requiredVersion {
-		panic(fmt.Errorf("version %s of %s doesn't match the required version %s", version, libname, requiredVersion))
+		panic(fmt.Errorf("version %s of %s doesn't match the required version %s", version, dllPath, requiredVersion))
 	}
 
 	return uintptr(handle)
